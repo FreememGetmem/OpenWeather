@@ -2,6 +2,57 @@ import requests
 import json
 import time
 import os
+import boto3
+import datetime
+import pandas as pd
+from io import StringIO
+import logging
+
+# Setup logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# Environment Variables (Configured in Lambda)
+S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME', 'mor-ndour')
+S3_FOLDER_PATH = os.getenv('S3_FOLDER_PATH', 'openweather/')
+SECRET_NAME = os.getenv('OPENWEATHER_SECRET_NAME', 'openweather-api-key')
+REGION_NAME = os.getenv('AWS_REGION', 'us-west-1')
+
+# Initialize AWS Clients
+secrets_client = boto3.client('secretsmanager', region_name=REGION_NAME)
+s3_client = boto3.client('s3')
+
+# Generate Timestamp for File Naming
+timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+S3_CALENDLY_PATH = f"{S3_FOLDER_PATH}openweather_{timestamp}.csv"
+
+def get_openweather_api_key():
+    """Fetch OpenWeather API key from Secrets Manager."""
+    try:
+        response = secrets_client.get_secret_value(SecretId=SECRET_NAME)
+        secret = json.loads(response['SecretString'])
+        return secret.get('openweather-api-key')
+    except Exception as e:
+        logger.error(f"Error fetching API key from Secrets Manager: {e}")
+        raise
+
+
+def upload_to_s3(df, s3_path):
+    """Upload DataFrame to S3."""
+    if df.empty:
+        logger.info(f"No data to upload for {s3_path}")
+        return
+    
+    csv_buffer = StringIO()
+    df.to_csv(csv_buffer, index=False)
+    
+    s3_client.put_object(
+        Bucket=S3_BUCKET_NAME,
+        Key=s3_path,
+        Body=csv_buffer.getvalue()
+    )
+    
+    logger.info(f"Uploaded {s3_path} to S3")
 
 def get_california_cities():
     """Return a list of major cities in California"""
@@ -69,7 +120,7 @@ def get_temperature_data(api_key, cities):
             }
             
             weather_data.append(city_weather)
-            print(f"Fetched data for {city['name']}: {city_weather['temperature']}°F")
+            #print(f"Fetched data for {city['name']}: {city_weather['temperature']}°F")
             
             # Add a small delay between requests to respect API rate limits
             if i < len(cities) - 1:  # Don't sleep after the last request
@@ -80,35 +131,59 @@ def get_temperature_data(api_key, cities):
         except KeyError as e:
             print(f"Unexpected response format for {city['name']}: {e}")
     
-    return weather_data
+    return pd.DataFrame(weather_data)
 
-def save_to_json(data, filename):
-    """Save weather data to a JSON file"""
-    with open(filename, 'w') as f:
-        json.dump(data, f, indent=4)
-    print(f"Data saved to {filename}")
+def lambda_handler(event, context):
+    logger.info("Lambda execution started")
 
-def main():
-    # Get your API key from environment variable or replace with your actual key
-    api_key = '7e4f6a0fb4d39473a8c8bf853718f04c'
-    
-    if not api_key:
-        print("Please set the OPENWEATHER_API_KEY environment variable")
-        print("Or replace the api_key variable with your actual API key")
-        return
-    
-    # Get the list of California cities
-    cities = get_california_cities()
-    print(f"Fetching weather data for {len(cities)} California cities...")
-    
-    # Fetch temperature data
-    weather_data = get_temperature_data(api_key, cities)
-    
-    # Save to JSON file
-    save_to_json(weather_data, 'california_temperatures.json')
-    
-    # Print summary
-    print(f"\nSuccessfully retrieved data for {len(weather_data)} out of {len(cities)} cities")
+    try:
+        api_key = get_openweather_api_key()
+        print(api_key)
 
-if __name__ == "__main__":
-    main()
+        # Fetch OpenWeather Data
+        cities = get_california_cities()   
+
+        # Fetch temperature data
+        openweather_data = get_temperature_data(api_key, cities)
+
+        # Upload Raw Data to S3
+        upload_to_s3(openweather_data, S3_CALENDLY_PATH)
+
+        logger.info("Lambda execution completed successfully")
+
+        return {
+            'statusCode': 200,
+            'body': json.dumps("Lambda execution completed successfully")
+        }
+
+    except Exception as e:
+        logger.error(f"Error during Lambda execution: {e}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps(f"Lambda execution failed: {e}")
+        }
+
+# def main():
+#     # Get your API key from environment variable or replace with your actual key
+#     api_key = '7e4f6a0fb4d39473a8c8bf853718f04c'
+    
+#     if not api_key:
+#         print("Please set the OPENWEATHER_API_KEY environment variable")
+#         print("Or replace the api_key variable with your actual API key")
+#         return
+    
+#     # Get the list of California cities
+#     cities = get_california_cities()
+#     print(f"Fetching weather data for {len(cities)} California cities...")
+    
+#     # Fetch temperature data
+#     weather_data = get_temperature_data(api_key, cities)
+    
+#     # Save to JSON file
+#     #save_to_json(weather_data, 'california_temperatures.json')
+    
+#     # Print summary
+#     print(f"\nSuccessfully retrieved data for {len(weather_data)} out of {len(cities)} cities")
+
+# if __name__ == "__main__":
+#     main()
